@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -26,13 +27,20 @@ from .eval import (
     validate_threshold,
 )
 from .ingest import import_catalog
-from .search import guard_results, hybrid_search
+from .rewrite import CachedRewriter, OllamaRewriter
+from .search import REWRITE_MODES, guard_results, hybrid_search, resolve_query
 
 MAX_THRESHOLDS = 10001
 
 
 def _embedder(cfg):
     return OllamaEmbedding(base_url=cfg.ollama_base_url, model=cfg.embedding_model, dim=cfg.embedding_dim)
+
+
+def _rewriter(cfg, mode: str):
+    if mode == "off":
+        return None
+    return CachedRewriter(OllamaRewriter(base_url=cfg.ollama_base_url))
 
 
 def _redact_secrets(text: str) -> str:
@@ -76,11 +84,24 @@ def cmd_search(args) -> int:
     threshold = validate_threshold(
         args.threshold if args.threshold is not None else cfg.guard_threshold
     )
+    mode = args.rewrite
+    query_text, rewrite = resolve_query(args.query, _rewriter(cfg, mode), mode)
+    if query_text is None:
+        out = {
+            "ok": False,
+            "guard": "no_match",
+            "threshold": threshold,
+            "rewrite_mode": mode,
+            "rewrite": rewrite,
+            "results": [],
+        }
+        print(json.dumps(out, ensure_ascii=False))
+        return 0
     with connect(db_url) as conn:
         results = hybrid_search(
             conn,
             schema=schema,
-            query_text=args.query,
+            query_text=query_text,
             embedder=_embedder(cfg),
             model=cfg.embedding_model,
             dim=cfg.embedding_dim,
@@ -88,12 +109,21 @@ def cmd_search(args) -> int:
         )
         ok, final = guard_results(results, threshold)
     if not ok:
-        out = {"ok": False, "guard": "no_match", "threshold": threshold, "results": []}
+        out = {
+            "ok": False,
+            "guard": "no_match",
+            "threshold": threshold,
+            "rewrite_mode": mode,
+            "rewrite": rewrite,
+            "results": [],
+        }
         print(json.dumps(out, ensure_ascii=False))
         return 0
     out = {
         "ok": True,
         "threshold": threshold,
+        "rewrite_mode": mode,
+        "rewrite": rewrite,
         "results": [
             {"product_id": r.product_id, "cosine_similarity": r.cosine_similarity, "rrf_score": r.rrf_score}
             for r in final
@@ -186,7 +216,9 @@ def cmd_add_post(args) -> int:
     return 0
 
 
-def _run_eval_cases(args, cases: list[EvalCase], threshold: float, db_url: str, schema: str):
+def _run_eval_cases(
+    args, cases: list[EvalCase], threshold: float, db_url: str, schema: str, rewriter=None, mode: str = "off"
+):
     cfg = get_config()
     embedder = _embedder(cfg)
     with connect(db_url) as conn:
@@ -200,10 +232,16 @@ def _run_eval_cases(args, cases: list[EvalCase], threshold: float, db_url: str, 
         outcomes: list[SearchOutcome] = []
         raw_for_sweep = []
         for c in cases:
+            query_text, _ = resolve_query(c.text, rewriter, mode)
+            if query_text is None:
+                # NONE means no product need: no_match without searching.
+                outcomes.append(SearchOutcome(product_ids=[], ok=False))
+                raw_for_sweep.append(([], float("-inf")))
+                continue
             results = hybrid_search(
                 conn,
                 schema=schema,
-                query_text=c.text,
+                query_text=query_text,
                 embedder=embedder,
                 model=cfg.embedding_model,
                 dim=cfg.embedding_dim,
@@ -218,7 +256,7 @@ def _run_eval_cases(args, cases: list[EvalCase], threshold: float, db_url: str, 
 
 
 def _run_synthetic_eval(
-    cases: list[EvalCase], db_url: str, schema: str, threshold: float
+    cases: list[EvalCase], db_url: str, schema: str, threshold: float, rewriter=None, mode: str = "off"
 ) -> tuple[dict, bool]:
     cfg = get_config()
     embedder = _embedder(cfg)
@@ -226,11 +264,25 @@ def _run_synthetic_eval(
     executed = 0
     with connect(db_url) as conn:
         for c in cases:
+            query_text, rewrite = resolve_query(c.text, rewriter, mode)
+            if query_text is None:
+                executed += 1
+                rows.append(
+                    {
+                        "id": c.id,
+                        "status": "ok",
+                        "guard": "no_match",
+                        "product_ids": [],
+                        "cosines": [],
+                        **({"rewrite_mode": mode, "rewrite": rewrite} if mode != "off" else {}),
+                    }
+                )
+                continue
             try:
                 results = hybrid_search(
                     conn,
                     schema=schema,
-                    query_text=c.text,
+                    query_text=query_text,
                     embedder=embedder,
                     model=cfg.embedding_model,
                     dim=cfg.embedding_dim,
@@ -248,6 +300,7 @@ def _run_synthetic_eval(
                     "guard": "match" if ok else "no_match",
                     "product_ids": [r.product_id for r in results],
                     "cosines": [r.cosine_similarity for r in results],
+                    **({"rewrite_mode": mode, "rewrite": rewrite} if mode != "off" else {}),
                 }
             )
     return {"synthetic": True, "executed": executed, "cases": rows}, executed == len(cases)
@@ -264,15 +317,22 @@ def cmd_eval(args) -> int:
     cases = load_jsonl(path)
     if not cases:
         raise ValueError("eval file is empty or has no runnable cases")
+    mode = args.rewrite
+    rewriter = _rewriter(cfg, mode)
 
     if is_synthetic_path(path):
-        out, all_executed = _run_synthetic_eval(cases, db_url, schema, threshold)
+        out, all_executed = _run_synthetic_eval(
+            cases, db_url, schema, threshold, rewriter=rewriter, mode=mode
+        )
         print(json.dumps(out, ensure_ascii=False))
         return 0 if all_executed else 1
 
-    outcomes, _, _ = _run_eval_cases(args, cases, threshold, db_url, schema)
+    outcomes, _, _ = _run_eval_cases(args, cases, threshold, db_url, schema, rewriter, mode)
     report = score_eval(cases, outcomes, path=path)
-    print(json.dumps(report.to_dict(), ensure_ascii=False))
+    payload = report.to_dict()
+    if mode != "off":
+        payload["rewrite_mode"] = mode
+    print(json.dumps(payload, ensure_ascii=False))
     return 0 if report.passed else 1
 
 
@@ -286,9 +346,11 @@ def cmd_sweep(args) -> int:
     cases = load_jsonl(path)
     if not cases:
         raise ValueError("eval file is empty or has no runnable cases")
+    mode = args.rewrite
+    rewriter = _rewriter(cfg, mode)
     thresholds = [round(x, 10) for x in frange(args.min, args.max, args.step)]
     # Guard is applied per sweep threshold; raw top3 is collected once.
-    outcomes, raw, _ = _run_eval_cases(args, cases, 0.0, db_url, schema)
+    outcomes, raw, _ = _run_eval_cases(args, cases, 0.0, db_url, schema, rewriter, mode)
     rows = threshold_sweep(cases, raw, thresholds)
     print(json.dumps({"path": path, "sweep": rows}, ensure_ascii=False))
     return 0
@@ -315,6 +377,10 @@ def frange(start, stop, step):
         yield start + i * step
 
 
+def _rewrite_default() -> str:
+    return os.environ.get("RAG_REWRITE_MODE", "off")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rag-slice")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -337,6 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--schema")
     sp.add_argument("--threshold", type=float)
     sp.add_argument("--top-k", type=int, default=3)
+    sp.add_argument("--rewrite", choices=REWRITE_MODES, default=_rewrite_default())
     sp.set_defaults(func=cmd_search)
 
     sp = sub.add_parser("catalog")
@@ -356,6 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--database-url")
     sp.add_argument("--schema")
     sp.add_argument("--threshold", type=float)
+    sp.add_argument("--rewrite", choices=REWRITE_MODES, default=_rewrite_default())
     sp.set_defaults(func=cmd_eval)
 
     sp = sub.add_parser("sweep")
@@ -365,6 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min", type=float, default=0.30)
     sp.add_argument("--max", type=float, default=0.80)
     sp.add_argument("--step", type=float, default=0.05)
+    sp.add_argument("--rewrite", choices=REWRITE_MODES, default=_rewrite_default())
     sp.set_defaults(func=cmd_sweep)
 
     return p

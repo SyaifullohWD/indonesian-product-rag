@@ -20,7 +20,8 @@ from rag_slice.eval import (
     validate_cases,
     validate_threshold,
 )
-from rag_slice.search import guard_results, hybrid_search
+from rag_slice.rewrite import CachedRewriter, clean_reply
+from rag_slice.search import guard_results, hybrid_search, resolve_query
 
 CSV_HEADER = "product_id,name,category,description,price_idr"
 
@@ -624,3 +625,223 @@ def test_error_output_redacts_credentials(monkeypatch, capsys):
     assert rc == 2
     assert "supersecret" not in err
     assert "***" in err
+
+
+# --- query rewriting -------------------------------------------------------
+
+
+class _FakeRewriter:
+    def __init__(self, reply, model="m"):
+        self.reply = reply
+        self.model = model
+        self.calls = []
+
+    def rewrite(self, text):
+        self.calls.append(text)
+        return self.reply
+
+
+def test_resolve_query_off_ignores_rewriter():
+    class Boom:
+        def rewrite(self, text):
+            raise AssertionError("rewriter must not be called in off mode")
+
+    assert resolve_query("post", Boom(), "off") == ("post", None)
+    assert resolve_query("post", None, "off") == ("post", None)
+
+
+def test_resolve_query_replace_and_concat():
+    fake = _FakeRewriter("masker wajah untuk komedo")
+    assert resolve_query("cara hilangin komedo", fake, "replace") == (
+        "masker wajah untuk komedo",
+        "masker wajah untuk komedo",
+    )
+    assert resolve_query("cara hilangin komedo", fake, "concat") == (
+        "cara hilangin komedo\nmasker wajah untuk komedo",
+        "masker wajah untuk komedo",
+    )
+    assert fake.calls == ["cara hilangin komedo", "cara hilangin komedo"]
+
+
+def test_resolve_query_none_short_circuits():
+    fake = _FakeRewriter("NONE")
+    assert resolve_query("mau ke dokter", fake, "replace") == (None, "NONE")
+    assert resolve_query("mau ke dokter", fake, "concat") == (None, "NONE")
+
+
+@pytest.mark.parametrize("mode", ["", "REPLACE", "both", None])
+def test_resolve_query_rejects_unknown_mode(mode):
+    with pytest.raises(ValueError):
+        resolve_query("post", _FakeRewriter("x"), mode)
+
+
+def test_resolve_query_requires_rewriter_when_enabled():
+    with pytest.raises(ValueError):
+        resolve_query("post", None, "replace")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ('  "masker wajah untuk komedo."\npenjelasan', "masker wajah untuk komedo"),
+        ("'serum wajah'", "serum wajah"),
+        ("toner wajah...", "toner wajah"),
+        ("NONE.", "NONE"),
+        ("none", "NONE"),
+        ("  NONE  ", "NONE"),
+        ("", "NONE"),
+        ("   \n  ", "NONE"),
+    ],
+)
+def test_clean_reply(raw, expected):
+    assert clean_reply(raw) == expected
+
+
+def test_ollama_rewriter_request_shape(monkeypatch):
+    import rag_slice.rewrite as rewrite
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, path, json):
+            captured["path"] = path
+            captured["json"] = json
+            return _FakeResponse({"message": {"content": "  'masker wajah untuk komedo.'\n"}})
+
+    monkeypatch.setattr(rewrite.httpx, "Client", FakeClient)
+    rw = rewrite.OllamaRewriter(base_url="http://localhost:11434", model="qwen3.5-9b-64k:latest")
+    out = rw.rewrite("cara hilangin komedo di hidung gimana ya?")
+
+    assert out == "masker wajah untuk komedo"
+    payload = captured["json"]
+    assert captured["path"] == "/api/chat"
+    assert payload["model"] == "qwen3.5-9b-64k:latest"
+    assert payload["stream"] is False
+    assert payload["think"] is False
+    assert payload["options"] == {"temperature": 0}
+    assert [m["role"] for m in payload["messages"]] == ["system", "user"]
+    assert payload["messages"][0]["content"] == rewrite.SYSTEM_PROMPT
+    assert payload["messages"][1]["content"] == "cara hilangin komedo di hidung gimana ya?"
+    assert "catalog" not in json.dumps(payload).lower()
+    assert captured["kwargs"]["timeout"] == 120.0
+
+
+def test_ollama_rewriter_model_comes_from_env(monkeypatch):
+    import rag_slice.rewrite as rewrite
+
+    monkeypatch.setenv("RAG_REWRITE_MODEL", "custom:1b")
+    assert rewrite.OllamaRewriter(base_url="http://x").model == "custom:1b"
+    monkeypatch.delenv("RAG_REWRITE_MODEL")
+    assert rewrite.OllamaRewriter(base_url="http://x").model == rewrite.DEFAULT_REWRITE_MODEL
+
+
+def test_cached_rewriter_hit_makes_no_inner_call(tmp_path: Path):
+    inner = _FakeRewriter("masker wajah")
+    path = tmp_path / ".cache" / "rewrites.json"
+    cache = CachedRewriter(inner, path)
+
+    assert cache.rewrite("post") == "masker wajah"
+    assert cache.rewrite("post") == "masker wajah"
+    assert inner.calls == ["post"]
+
+    # A fresh instance reads the same file and still makes no call.
+    again = CachedRewriter(inner, path)
+    assert again.rewrite("post") == "masker wajah"
+    assert inner.calls == ["post"]
+
+
+def test_cached_rewriter_key_includes_model(tmp_path: Path):
+    path = tmp_path / "rewrites.json"
+    a = _FakeRewriter("a", model="model-a")
+    b = _FakeRewriter("b", model="model-b")
+    assert CachedRewriter(a, path).rewrite("post") == "a"
+    assert CachedRewriter(b, path).rewrite("post") == "b"
+    assert a.calls == ["post"] and b.calls == ["post"]
+
+
+def test_cached_rewriter_survives_corrupt_file(tmp_path: Path):
+    path = tmp_path / "rewrites.json"
+    path.write_text("{not json", encoding="utf-8")
+    inner = _FakeRewriter("toner")
+    assert CachedRewriter(inner, path).rewrite("post") == "toner"
+    assert inner.calls == ["post"]
+
+
+def test_rewriter_is_none_when_mode_off():
+    from rag_slice.cli import _rewriter
+    from rag_slice.config import get_config
+
+    assert _rewriter(get_config(), "off") is None
+
+
+def test_cli_rewrite_flag_parsing(monkeypatch):
+    from rag_slice.cli import build_parser
+
+    monkeypatch.delenv("RAG_REWRITE_MODE", raising=False)
+    parser = build_parser()
+    assert parser.parse_args(["search", "--query", "x"]).rewrite == "off"
+    for mode in ("off", "replace", "concat"):
+        assert parser.parse_args(["search", "--query", "x", "--rewrite", mode]).rewrite == mode
+    assert parser.parse_args(["eval", "--file", "f", "--rewrite", "concat"]).rewrite == "concat"
+    assert parser.parse_args(["sweep", "--file", "f", "--rewrite", "replace"]).rewrite == "replace"
+
+    monkeypatch.setenv("RAG_REWRITE_MODE", "concat")
+    assert build_parser().parse_args(["search", "--query", "x"]).rewrite == "concat"
+
+
+class _DummyConn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def test_cli_search_none_short_circuits_without_db(monkeypatch, capsys):
+    import rag_slice.cli as cli
+
+    monkeypatch.setattr(cli, "connect", lambda url: (_ for _ in ()).throw(AssertionError("no db")))
+    monkeypatch.setattr(cli, "_rewriter", lambda cfg, mode: _FakeRewriter("NONE"))
+
+    rc = cli.main(["search", "--query", "mau ke dokter", "--rewrite", "replace"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out["ok"] is False
+    assert out["guard"] == "no_match"
+    assert out["rewrite_mode"] == "replace"
+    assert out["rewrite"] == "NONE"
+    assert out["results"] == []
+
+
+def test_cli_search_concat_reports_rewrite_and_searches_joined_text(monkeypatch, capsys):
+    import rag_slice.cli as cli
+
+    seen = {}
+
+    def fake_search(conn, schema, query_text, embedder, model, dim, top_k=3):
+        seen["query_text"] = query_text
+        return [SearchResult("P1", 0.9, 0.5)]
+
+    monkeypatch.setattr(cli, "connect", lambda url: _DummyConn())
+    monkeypatch.setattr(cli, "hybrid_search", fake_search)
+    monkeypatch.setattr(cli, "_embedder", lambda cfg: None)
+    monkeypatch.setattr(cli, "_rewriter", lambda cfg, mode: _FakeRewriter("masker wajah"))
+
+    rc = cli.main(["search", "--query", "cara hilangin komedo", "--rewrite", "concat"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert seen["query_text"] == "cara hilangin komedo\nmasker wajah"
+    assert out["rewrite_mode"] == "concat"
+    assert out["rewrite"] == "masker wajah"
+    assert out["ok"] is True

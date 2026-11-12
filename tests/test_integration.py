@@ -367,3 +367,84 @@ def test_cli_sweep_guard_changes_recall_but_not_hitrate(
     assert [r["retrieval_hitrate"] for r in rows] == [1.0, 1.0, 1.0]
     assert [r["no_match_recall"] for r in rows] == [0.0, 0.0, 1.0]
     assert [r["guarded_positive_acceptance"] for r in rows] == [1.0, 1.0, 1.0]
+
+
+class _FakeRewriter:
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def rewrite(self, text):
+        self.calls.append(text)
+        return self.reply
+
+
+def test_cli_sweep_calls_rewriter_once_per_case(
+    db_conn, test_schema, db_url, tmp_path, monkeypatch, capsys
+):
+    from rag_slice.cli import main
+
+    emb = _seed_guard_catalog(db_conn, test_schema, tmp_path)
+    monkeypatch.setattr("rag_slice.cli._embedder", lambda cfg: emb)
+    fake = _FakeRewriter("sabun")
+    monkeypatch.setattr("rag_slice.cli._rewriter", lambda cfg, mode: fake)
+    path = write_eval(tmp_path / "real.jsonl", EVAL_CASES)
+
+    rc = main(
+        [
+            "sweep",
+            "--file",
+            str(path),
+            "--database-url",
+            db_url,
+            "--schema",
+            test_schema,
+            "--min",
+            "0.3",
+            "--max",
+            "0.7",
+            "--step",
+            "0.2",
+            "--rewrite",
+            "replace",
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    # Three thresholds, but one rewrite call per post.
+    assert fake.calls == ["sabun", "sepatu"]
+    assert [r["threshold"] for r in out["sweep"]] == [0.3, 0.5, 0.7]
+
+
+def test_cli_synthetic_eval_with_rewrite_reports_rewrite(
+    db_conn, test_schema, db_url, tmp_path, monkeypatch, capsys
+):
+    from rag_slice.cli import main
+
+    emb = _seed_guard_catalog(db_conn, test_schema, tmp_path)
+    monkeypatch.setattr("rag_slice.cli._embedder", lambda cfg: emb)
+    fake = _FakeRewriter("sabun")
+    monkeypatch.setattr("rag_slice.cli._rewriter", lambda cfg, mode: fake)
+    path = write_eval(tmp_path / "smoke_synthetic.jsonl", EVAL_CASES)
+
+    rc = main(
+        [
+            "eval",
+            "--file",
+            str(path),
+            "--database-url",
+            db_url,
+            "--schema",
+            test_schema,
+            "--threshold",
+            "0.55",
+            "--rewrite",
+            "replace",
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert [row["rewrite_mode"] for row in out["cases"]] == ["replace", "replace"]
+    assert [row["rewrite"] for row in out["cases"]] == ["sabun", "sabun"]

@@ -6,10 +6,31 @@ from psycopg import sql
 from .db import SearchResult
 from .embedding import EmbeddingClient, validate_vector
 from .eval import validate_threshold
+from .rewrite import NONE_REPLY, Rewriter
+
+REWRITE_MODES = ("off", "replace", "concat")
 
 
 class GuardedNoMatch(Exception):
     pass
+
+
+def resolve_query(
+    text: str, rewriter: Rewriter | None, mode: str
+) -> tuple[str | None, str | None]:
+    """Return (query_text, rewrite). query_text is None when the rewrite is NONE."""
+    if mode not in REWRITE_MODES:
+        raise ValueError(f"rewrite mode must be one of {', '.join(REWRITE_MODES)}")
+    if mode == "off":
+        return text, None
+    if rewriter is None:
+        raise ValueError("a rewriter is required when rewrite mode is not off")
+    need = rewriter.rewrite(text)
+    if need == NONE_REPLY:
+        return None, NONE_REPLY
+    if mode == "replace":
+        return need, need
+    return f"{text}\n{need}", need
 
 
 def hybrid_search(

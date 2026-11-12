@@ -50,6 +50,16 @@ uv run rag-slice sweep --file evals/real/posts.jsonl --min 0.30 --max 0.80 --ste
 
 `add-post` never shows the model's guess before you choose the label, so the labels stay independent of the system being tested. Real posts are kept in `evals/real/`, which is not committed; only the scores are published.
 
+## Query rewriting (optional)
+
+Posts often describe a problem ("cara hilangin komedo di hidung gimana ya?") instead of naming a product. With `--rewrite` the local model first turns the post into a short shopping need, and that need is searched.
+
+- `off` (default): search the post as it is.
+- `replace`: search only the rewritten need.
+- `concat`: search the post plus the rewritten need.
+
+If the model decides the post does not need a product (it replies `NONE`), the answer is `no_match` and no search runs. Use `--rewrite` on `search`, `eval`, and `sweep`, or set `RAG_REWRITE_MODE`. The model is `qwen3.5-9b-64k:latest` through Ollama; set `RAG_REWRITE_MODEL` to change it. Rewrites are cached in `.cache/rewrites.json`, so a repeated post makes no model call.
+
 ## Tests
 
 ```bash
