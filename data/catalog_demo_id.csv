@@ -1,0 +1,21 @@
+product_id,name,category,description,price_idr
+DEMO-001,Sabun Muka Lembut,Perawatan Wajah,Sabun muka harian untuk kulit sensitif dengan pH seimbang.,35000
+DEMO-002,Serum Vitamin C Cerah,Perawatan Wajah,Serum vitamin C 10% membantu mencerahkan kulit kusam.,89000
+DEMO-003,Pelembap Gel Ringan,Perawatan Wajah,Pelembap gel tanpa minyak cocok untuk kulit berminyak.,65000
+DEMO-004,Tabir Surya SPF 50,Perawatan Wajah,Tabir surya SPF 50 PA++++ untuk perlindungan harian.,75000
+DEMO-005,Toner Mawar Segar,Perawatan Wajah,Toner dengan ekstrak mawar untuk menyegarkan wajah.,42000
+DEMO-006,Masker Wajah Lumpur,Perawatan Wajah,Masker lumpur membantu membersihkan pori-pori.,48000
+DEMO-007,Sampo Anti Ketombe,Perawatan Rambut,Sampo membantu mengurangi ketombe dan gatal di kulit kepala.,39000
+DEMO-008,Kondisioner Rambut Halus,Perawatan Rambut,Kondisioner melembutkan rambut kering dan kusut.,41000
+DEMO-009,Minyak Rambut Argan,Perawatan Rambut,Minyak argan untuk rambut lebih berkilau dan mudah diatur.,55000
+DEMO-010,Sabun Mandi Susu,Perawatan Tubuh,Sabun mandi cair dengan ekstrak susu melembapkan kulit.,33000
+DEMO-011,Lotion Tubuh Aloe,Perawatan Tubuh,Lotion aloe vera menenangkan kulit setelah terpapar matahari.,45000
+DEMO-012,Lulur Kopi Tubuh,Perawatan Tubuh,Lulur kopi membantu mengangkat sel kulit mati.,52000
+DEMO-013,Pasta Gigi Mint Segar,Perawatan Gigi,Pasta gigi rasa mint untuk napas segar sepanjang hari.,18000
+DEMO-014,Sikat Gigi Lembut,Perawatan Gigi,Sikat gigi bulu lembut ramah untuk gusi sensitif.,12000
+DEMO-015,Obat Kumur Herbal,Perawatan Gigi,Obat kumur herbal membantu menjaga kebersihan mulut.,25000
+DEMO-016,Vitamin C 500mg,Kesehatan,Suplemen vitamin C untuk daya tahan tubuh harian.,60000
+DEMO-017,Madu Murni 250ml,Kesehatan,Madu murni sebagai pemanis alami dan suplemen harian.,70000
+DEMO-018,Teh Hijau Celup,Minuman,Teh hijau celup aroma segar untuk diminum hangat.,28000
+DEMO-019,Kopi Bubuk Arabika,Minuman,Kopi bubuk arabika dengan rasa ringan dan harum.,85000
+DEMO-020,Botol Minum 600ml,Aksesoris,Botol minum BPA free mudah dibawa untuk aktivitas harian.,99000

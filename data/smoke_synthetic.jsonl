@@ -1,0 +1,2 @@
+{"id":"smoke-1","text":"sabun muka untuk kulit sensitif","lang":"id","expected_product_id":"DEMO-001"}
+{"id":"smoke-neg-1","text":"rekomendasi sepatu lari maraton","lang":"id","expected_product_id":"no_match"}
